@@ -249,20 +249,21 @@ all calls pick it up automatically.
 
 **The driver is derived from the connection string, not configured.** A
 `postgres://` / `postgresql://` URL (or a libpq `host=… user=…` DSN) opens
-Postgres; anything else is a SQLite file path. That single rule is what the
+Postgres; a `mysql://…` URL opens MySQL; anything else is a SQLite file path
+unless you call `Db.open "mysql" ...` explicitly. That single rule is what the
 runtime applies, and every dialect-specific behaviour downstream follows from it.
 
 ```toml
 [database]
-path   = "./app.db"        # sqlite file path or postgres URL → the driver
+path   = "./app.db"        # sqlite file path, postgres URL, or mysql URL → the driver
 # url  = "postgres://…"    # alias for `path` (same DB_PATH)
-driver = "sqlite"          # OPTIONAL assertion — must agree with the DSN above
+driver = "sqlite"          # OPTIONAL assertion: sqlite / postgres / mysql
 ```
 
 | Key      | Env var                  | Default   | Meaning                                          |
 |----------|--------------------------|-----------|--------------------------------------------------|
 | `path`   | `<PREFIX>_DB_PATH`       | (empty)   | File path or connection URL — **selects the driver** |
-| `url`    | `<PREFIX>_DB_PATH`       | (empty)   | Alias for `path` (postgres DSN)                  |
+| `url`    | `<PREFIX>_DB_PATH`       | (empty)   | Alias for `path` (database DSN)                  |
 | `driver` | *(none)*                 | (unset)   | Optional consistency assertion; see below        |
 | `embedded` | *(none)*               | `false`   | `sky run` supervises a local cluster and provisions the DSN — see [below](#embedded-postgresql) |
 | `postgresVersion` | *(none)*        | (unset)   | The PostgreSQL `sky db provision --embed` fetched and `sky db start` prefers |
@@ -276,7 +277,7 @@ run time, set the DSN (`SKY_DB_PATH` / `DATABASE_URL`), not a driver name.
 > in the runtime ever read**, so a mismatched `driver` was silently ignored and
 > the app quietly opened the other engine. The variable is no longer emitted.
 
-### Connection pool (PostgreSQL)
+### Connection pool (PostgreSQL / MySQL)
 
 **You should not need these.** The runtime sizes the pool from the deployment it
 detects, and the defaults are chosen rather than inherited. Reach for them when
@@ -285,7 +286,7 @@ it — that is a fact about your deployment which the app cannot see.
 
 ```toml
 [database]
-url             = "postgres://…"
+url             = "postgres://…" # or mysql://…
 maxOpenConns    = 12        # ceiling on simultaneous backends
 maxIdleConns    = 12        # keep them; below open causes reconnect churn
 connMaxLifetime = "30m"     # retire a connection so a failover heals
@@ -319,7 +320,7 @@ than automatic. And `connMaxIdleTime` is short, because a frozen instance keeps
 its TCP connections and therefore the PostgreSQL backend *processes* behind them
 alive while doing no work at all.
 
-**These keys are PostgreSQL-only.** SQLite is pinned to a single connection by
+**These keys apply to server databases (PostgreSQL / MySQL).** SQLite is pinned to a single connection by
 its global writer lock — raising it reintroduces the `SQLITE_BUSY` class — so
 setting them alongside a SQLite DSN logs a warning and changes nothing.
 
@@ -909,7 +910,7 @@ config : Config.Config
 config =
     Config.default
         |> Config.withLog Json Warn
-        |> Config.withDatabase (Postgres "postgres://localhost/app")
+        |> Config.withDatabase (Postgres "postgres://localhost/app")  -- or Mysql "mysql://host/db"
         |> Config.withSessions Config.SharedWithDatabase
 
 main =

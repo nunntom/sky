@@ -86,7 +86,7 @@ type LogLevel
     | Error
 
 -- | Which database the app talks to. `Sqlite` names a single-file path (a
--- great default for a pet/prototype tier); `Postgres` names a DSN.
+-- great default for a pet/prototype tier); `Postgres` / `Mysql` name a DSN.
 --
 -- The DSN is deployment-owned in some tiers — an operator's `DATABASE_URL`
 -- still wins over this builder — and a project configured for an EMBEDDED
@@ -98,6 +98,7 @@ type LogLevel
 type Database
     = Sqlite String
     | Postgres String
+    | Mysql String
 
 -- | Which Sky.Live session store the app uses. One typed strategy replacing
 -- the two stringly-typed `Live.withStore` / `Live.withStorePath` knobs.
@@ -178,7 +179,7 @@ withLog format level cfg =
 
 
 -- | Set the database the app connects to (`<PREFIX>_DB_PATH` for SQLite,
--- `DATABASE_URL` for Postgres). Operator env still wins; do not combine with
+-- `DATABASE_URL` for Postgres/MySQL). Operator env still wins; do not combine with
 -- `--embed` (see `Database`).
 withDatabase : Database -> Config -> Config
 withDatabase db cfg =
@@ -387,6 +388,9 @@ databaseKind db =
         Postgres _ ->
             "postgres"
 
+        Mysql _ ->
+            "mysql"
+
 
 databaseValue : Database -> String
 databaseValue db =
@@ -396,6 +400,9 @@ databaseValue db =
             path
 
         Postgres url ->
+            url
+
+        Mysql url ->
             url
 
 

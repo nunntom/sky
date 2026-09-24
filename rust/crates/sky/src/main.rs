@@ -8590,7 +8590,8 @@ impl DbDestructive {
 
 /// Read the DB driver from `sky.toml` for the confirmation prompt. Mirrors
 /// `read_sky_toml_config`'s `[database]` handling: `driver` (default `sqlite`);
-/// a `postgres://`/`postgresql://` DSN in `path`/`url` also implies postgres.
+/// a `postgres://`/`postgresql://` DSN in `path`/`url` implies postgres, and
+/// `mysql://` implies mysql.
 fn db_driver_label() -> String {
     let text = match std::fs::read_to_string("sky.toml") {
         Ok(t) => t,
@@ -8636,6 +8637,7 @@ fn db_driver_label() -> String {
     };
     match d.to_lowercase().as_str() {
         "postgres" | "postgresql" | "pgx" | "pg" => "postgres".to_string(),
+        "mysql" | "mariadb" => "mysql".to_string(),
         _ => "sqlite".to_string(),
     }
 }

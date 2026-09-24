@@ -1,7 +1,7 @@
 -- | Std.Db.Schema — a typed, dialect-aware schema builder (Layer 3 Sky source).
 --
 -- Define tables + columns as typed values; `Schema.createTable` emits the
--- DIALECT-CORRECT DDL for the connection's backend (SQLite or Postgres). The
+-- DIALECT-CORRECT DDL for the connection's backend (SQLite, Postgres, or MySQL). The
 -- SAME definition works on both — no hand-written CREATE TABLE, no
 -- `INTEGER`-vs-`BIGINT` / `AUTOINCREMENT`-vs-`BIGSERIAL` / `datetime()`-vs-`now()`
 -- surprises when you move from a SQLite dev box to a Postgres deployment.
@@ -120,20 +120,20 @@ int n =
     newColumn n "int"
 
 
--- | 64-bit integer — INTEGER on SQLite, BIGINT on Postgres. Use this for
+-- | 64-bit integer — INTEGER on SQLite, BIGINT on Postgres/MySQL. Use this for
 -- millisecond timestamps (Postgres INTEGER overflows at ~2.1s of millis).
 bigInt : String -> Column
 bigInt n =
     newColumn n "bigint"
 
 
--- | Floating point — REAL on SQLite, DOUBLE PRECISION on Postgres.
+-- | Floating point — REAL on SQLite, DOUBLE PRECISION on Postgres, DOUBLE on MySQL.
 real : String -> Column
 real n =
     newColumn n "real"
 
 
--- | Boolean — rendered as **BOOLEAN on Postgres** and **INTEGER 0/1 on SQLite**
+-- | Boolean — rendered as **BOOLEAN on Postgres/MySQL** and **INTEGER 0/1 on SQLite**
 -- by the dialect-safe renderer (a table created by Sky gets the right column
 -- type per backend). A `SqlBool` param (a native Go bool) binds cleanly to both,
 -- and the codec / `Decode.bool` reads either representation back, so a value
@@ -152,7 +152,7 @@ timestamp n =
     newColumn n "timestamp"
 
 
--- | Binary — BLOB on SQLite, BYTEA on Postgres.
+-- | Binary — BLOB on SQLite, BYTEA on Postgres, LONGBLOB on MySQL.
 blob : String -> Column
 blob n =
     newColumn n "blob"
@@ -172,7 +172,7 @@ id n =
 
 
 -- | An auto-incrementing integer primary key — INTEGER PRIMARY KEY AUTOINCREMENT
--- on SQLite, BIGSERIAL PRIMARY KEY on Postgres.
+-- on SQLite, BIGSERIAL PRIMARY KEY on Postgres, BIGINT AUTO_INCREMENT PRIMARY KEY on MySQL.
 serial : String -> Column
 serial n =
     autoIncrement (primaryKey (newColumn n "bigint"))
@@ -230,7 +230,7 @@ defaultBool b c =
     }
 
 
--- | Current-timestamp default — `datetime('now')` on SQLite, `now()` on Postgres.
+-- | Current-timestamp default — `datetime('now')` on SQLite, `now()` on Postgres, `CURRENT_TIMESTAMP` on MySQL.
 defaultNow : Column -> Column
 defaultNow c =
     { c | defaultKind = "now", defaultVal = "" }

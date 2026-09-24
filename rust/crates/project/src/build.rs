@@ -1040,7 +1040,9 @@ fn parse_toml_scalar(raw: &str) -> String {
 /// The driver the RUNTIME will actually use for a connection string — a mirror
 /// of `rt.detectDriver` (`runtime-go/rt/db_auth.go`), which is the only thing
 /// that decides this. Kept in lockstep with it: a `postgres://` / `postgresql://`
-/// URL or a libpq keyword DSN is Postgres, everything else is SQLite.
+/// URL or a libpq keyword DSN is Postgres, a `mysql://` URL is MySQL,
+/// everything else is SQLite. (`Db.open "mysql" dsn` can still force MySQL for
+/// native go-sql-driver DSNs that are not URL-shaped.)
 pub fn driver_for_dsn(dsn: &str) -> &'static str {
     let low = dsn.trim().to_ascii_lowercase();
     if low.starts_with("postgres://")
@@ -1048,6 +1050,8 @@ pub fn driver_for_dsn(dsn: &str) -> &'static str {
         || (low.contains("host=") && low.contains("user="))
     {
         "pgx"
+    } else if low.starts_with("mysql://") {
+        "mysql"
     } else {
         "sqlite"
     }
@@ -1060,6 +1064,7 @@ fn driver_names_match(declared: &str, actual: &str) -> bool {
     let d = declared.trim().to_ascii_lowercase();
     match actual {
         "pgx" => matches!(d.as_str(), "pgx" | "postgres" | "postgresql"),
+        "mysql" => matches!(d.as_str(), "mysql" | "mariadb"),
         other => d == other,
     }
 }
@@ -1166,6 +1171,8 @@ pub fn offline_db_plan(project_dir: &Path) -> OfflineDbPlan {
             let d = d.trim().to_ascii_lowercase();
             if matches!(d.as_str(), "postgres" | "postgresql" | "pgx") {
                 "pgx"
+            } else if matches!(d.as_str(), "mysql" | "mariadb") {
+                "mysql"
             } else {
                 "sqlite"
             }
@@ -1177,6 +1184,10 @@ pub fn offline_db_plan(project_dir: &Path) -> OfflineDbPlan {
     };
     if engine == "sqlite" {
         OfflineDbPlan::Sqlite { db_path_env }
+    } else if engine == "mysql" {
+        // MySQL has no embedded/offline provisioner; leave the configured DSN
+        // alone rather than silently running tests against a different engine.
+        OfflineDbPlan::None
     } else {
         OfflineDbPlan::Postgres
     }
@@ -3063,6 +3074,7 @@ mod sky_toml_tests {
         assert_eq!(driver_for_dsn("postgresql://u:p@h/db"), "pgx");
         assert_eq!(driver_for_dsn("POSTGRES://u:p@h/db"), "pgx");
         assert_eq!(driver_for_dsn("host=localhost user=app dbname=x"), "pgx");
+        assert_eq!(driver_for_dsn("mysql://u:p@h/db"), "mysql");
         assert_eq!(driver_for_dsn("./app.db"), "sqlite");
         assert_eq!(driver_for_dsn("app.db"), "sqlite");
         assert_eq!(driver_for_dsn("file:x.db?cache=shared"), "sqlite");
@@ -3086,6 +3098,13 @@ mod sky_toml_tests {
             w.contains("postgres"),
             "must name the driver actually used: {w}"
         );
+
+        let w = db_driver_conflict(Some("postgres"), Some("mysql://u@h/db"))
+            .expect("a postgres driver over a mysql URL must be reported");
+        assert!(
+            w.contains("mysql"),
+            "must name the driver actually used: {w}"
+        );
     }
 
     /// …and the converse, so the check cannot pass by shouting at everyone.
@@ -3096,6 +3115,8 @@ mod sky_toml_tests {
         assert!(db_driver_conflict(Some("postgres"), Some("postgres://u@h/d")).is_none());
         assert!(db_driver_conflict(Some("postgresql"), Some("postgres://u@h/d")).is_none());
         assert!(db_driver_conflict(Some("pgx"), Some("postgres://u@h/d")).is_none());
+        assert!(db_driver_conflict(Some("mysql"), Some("mysql://u@h/d")).is_none());
+        assert!(db_driver_conflict(Some("mariadb"), Some("mysql://u@h/d")).is_none());
         // No declared driver, or no declared DSN (it may arrive at run time via
         // SKY_DB_PATH / DATABASE_URL) → nothing to check.
         assert!(db_driver_conflict(None, Some("./app.db")).is_none());

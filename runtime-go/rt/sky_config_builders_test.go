@@ -405,6 +405,10 @@ func TestConfigKernels_SecondWave(t *testing.T) {
 	if dbS["DbPath"] != "a.db" || dbS["DatabaseUrl"] != nil {
 		t.Fatalf("withDatabase Sqlite must set only DbPath: %v", dbS)
 	}
+	dbM := Config_withDatabase("mysql", "mysql://h/db", base).(map[string]any)
+	if dbM["DatabaseUrl"] != "mysql://h/db" || dbM["DbPath"] != nil {
+		t.Fatalf("withDatabase MySQL must set only DatabaseUrl: %v", dbM)
+	}
 
 	sh := Config_withSessions("postgres", "", base).(map[string]any)
 	if sh["LiveStore"] != "postgres" || sh["LiveStorePath"] != nil {

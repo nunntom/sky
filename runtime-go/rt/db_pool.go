@@ -499,7 +499,7 @@ func resolveDbPoolConfig(driver string) dbPoolConfig {
 // without a second copy of the resolution rules (defaults, env overrides,
 // clamps and all).
 func resolveDbPoolConfigFor(driver string, cpus int, serverless bool) dbPoolConfig {
-	if driver != "pgx" {
+	if driver == "sqlite" {
 		// SQLite. Warn rather than silently ignore — a knob that looks
 		// set and does nothing is the failure mode sky.toml's
 		// unknown-key warning exists to prevent.
@@ -576,7 +576,7 @@ func resolveDbTxConfig(driver string) dbTxConfig {
 	cfg := dbTxConfig{}
 	raw := strings.TrimSpace(skyGetenv("DB_ISOLATION"))
 	if raw != "" {
-		if driver != "pgx" {
+		if driver == "sqlite" {
 			// SQLite serialises every transaction on the single pooled
 			// connection under its global write lock, so there is no
 			// weaker level to ask for and no stronger one to grant.
@@ -594,7 +594,7 @@ func resolveDbTxConfig(driver string) dbTxConfig {
 	if n := dbEnvInt("DB_TX_RETRY", 0); n > 0 {
 		if driver != "pgx" {
 			rtWarn("db.connect: " + skyEnvName("DB_TX_RETRY") +
-				" is ignored on SQLite — SQLite does not raise 40001/40P01")
+				" is ignored outside Postgres — retry classification is currently SQLSTATE 40001/40P01 only")
 		} else {
 			cfg.Retries = clampInt(n, 0, 10)
 		}

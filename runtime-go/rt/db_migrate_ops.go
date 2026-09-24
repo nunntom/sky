@@ -144,11 +144,20 @@ func renderMigOp(driver string, op migOp) (string, error) {
 		if op.Unique {
 			kw = "UNIQUE INDEX"
 		}
+		if driver == "mysql" {
+			return fmt.Sprintf("CREATE %s %s ON %s (%s)", kw, op.Name, op.Table, strings.Join(op.IndexColumns, ", ")), nil
+		}
 		return fmt.Sprintf("CREATE %s IF NOT EXISTS %s ON %s (%s)", kw, op.Name, op.Table, strings.Join(op.IndexColumns, ", ")), nil
 
 	case "dropIndex":
 		if !codecValidIdent(op.Name) {
 			return "", fmt.Errorf("migration: invalid index name %q", op.Name)
+		}
+		if driver == "mysql" {
+			if !codecValidIdent(op.Table) {
+				return "", fmt.Errorf("migration: invalid table identifier %q", op.Table)
+			}
+			return "DROP INDEX " + op.Name + " ON " + op.Table, nil
 		}
 		return "DROP INDEX IF EXISTS " + op.Name, nil
 

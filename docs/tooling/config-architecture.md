@@ -851,7 +851,7 @@ withTelemetry  : Telemetry -> Config -> Config
 withConsole    : ConsoleAuth -> Config -> Config
 withCsrf       : Bool -> Config -> Config
 
-type Database  = Sqlite String | Postgres String
+type Database  = Sqlite String | Postgres String | Mysql String
 type Sessions  = Memory | SessionsSqlite String | SharedWithDatabase | Redis String
 type JobStore  = JobsMemory | JobsSqlite String | JobsSharedWithDatabase
 ```

@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"reflect"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 
 	"unicode"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib" // Postgres driver registered as "pgx"
@@ -33,7 +35,7 @@ import (
 type SkyDb struct {
 	conn   *sql.DB
 	name   string
-	driver string // "sqlite" or "pgx"
+	driver string // "sqlite", "pgx", or "mysql"
 	// tx is non-nil only for the tx-scoped handle Db_withTransaction hands
 	// to a transaction body. When set, every data op (exec/query/execRaw/
 	// insertRow/getById/updateById/deleteById/find*) runs on THIS *sql.Tx
@@ -78,7 +80,7 @@ func (d *SkyDb) executor() dbExecutor {
 	return d.conn
 }
 
-// placeholder returns "?" for SQLite, "$N" for Postgres.
+// placeholder returns "?" for SQLite/MySQL, "$N" for Postgres.
 func (d *SkyDb) placeholder(i int) string {
 	if d.driver == "pgx" {
 		return fmt.Sprintf("$%d", i)
@@ -103,6 +105,9 @@ func (d *SkyDb) placeholder(i int) string {
 // and Postgres rejected the statement. Do not reintroduce that assumption; the
 // gate is db_pgx_placeholder_test.go.
 func (d *SkyDb) rebind(query string) string {
+	if d.driver == "mysql" {
+		return mysqlRewriteQuery(query)
+	}
 	if d.driver != "pgx" || !strings.Contains(query, "?") {
 		return query
 	}
@@ -124,6 +129,28 @@ func (d *SkyDb) rebind(query string) string {
 		}
 	}
 	return b.String()
+}
+
+func mysqlRewriteQuery(query string) string {
+	q := query
+	// Sky's portable durable/workflow SQL historically used PostgreSQL/SQLite's
+	// `ON CONFLICT ...` spelling. MySQL accepts the same `?` placeholders but
+	// needs `ON DUPLICATE KEY UPDATE`; without this rewrite durable TEA appeared
+	// to run but every snapshot write failed behind the runtime's fire-and-forget
+	// durable boundary.
+	q = strings.ReplaceAll(q, "ON CONFLICT (id) DO NOTHING", "ON DUPLICATE KEY UPDATE id = id")
+	q = strings.ReplaceAll(q, "ON CONFLICT (run_id, name) DO NOTHING", "ON DUPLICATE KEY UPDATE run_id = run_id")
+	q = strings.ReplaceAll(q, "ON CONFLICT (run_id, step_id) DO NOTHING", "ON DUPLICATE KEY UPDATE run_id = run_id")
+	q = strings.ReplaceAll(q,
+		"ON CONFLICT (run_id) DO UPDATE SET seq = excluded.seq, model_json = excluded.model_json, updated_at = excluded.updated_at WHERE excluded.seq > _sky_durable_snapshot.seq",
+		"ON DUPLICATE KEY UPDATE seq = IF(VALUES(seq) > seq, VALUES(seq), seq), model_json = IF(VALUES(seq) > seq, VALUES(model_json), model_json), updated_at = IF(VALUES(seq) > seq, VALUES(updated_at), updated_at)")
+	q = strings.ReplaceAll(q,
+		"VALUES (?, COALESCE((SELECT seq FROM _sky_durable_snapshot WHERE run_id = ?), 0) + 1, ?, ?)",
+		"VALUES (?, IF(? IS NULL, 1, 1), ?, ?)")
+	q = strings.ReplaceAll(q,
+		"ON CONFLICT (run_id) DO UPDATE SET seq = _sky_durable_snapshot.seq + 1, model_json = excluded.model_json, updated_at = excluded.updated_at",
+		"ON DUPLICATE KEY UPDATE seq = seq + 1, model_json = VALUES(model_json), updated_at = VALUES(updated_at)")
+	return q
 }
 
 // placeholders produces a joined list of placeholders "$1,$2,$3" or "?,?,?"
@@ -174,6 +201,20 @@ func isSafeIdent(s string) bool {
 // safeTable wraps a table identifier after validation; returns "" if invalid.
 func safeTable(v any) string {
 	return quoteIdent(mustStringDisplay(v))
+}
+
+func (d *SkyDb) quoteIdent(s string) string {
+	if !isSafeIdent(s) {
+		return ""
+	}
+	if d != nil && d.driver == "mysql" {
+		return "`" + s + "`"
+	}
+	return "\"" + s + "\""
+}
+
+func (d *SkyDb) safeTable(v any) string {
+	return d.quoteIdent(mustStringDisplay(v))
 }
 
 // Audit P3-4: every `fmt.Sprintf("%v", x)` in the hot paths
@@ -233,6 +274,10 @@ var (
 // caller sees a clear "no path configured" message rather than
 // silently opening a file named `{}` in cwd (the pre-P3-4 bug).
 func Db_connect(path any) any {
+	return dbConnect(path, "")
+}
+
+func dbConnect(path any, forcedDriver string) any {
 	// Returns a Task thunk so the actual sql.Open is deferred until
 	// Cmd.perform / Task.run forces it. Eager evaluation here would
 	// block Sky.Live's update() call instead of running in the
@@ -260,12 +305,16 @@ func Db_connect(path any) any {
 		if errRes != nil {
 			return errRes
 		}
+		driver, dsn := detectDriverForced(p, forcedDriver)
+		registryKey := p
+		if forcedDriver != "" {
+			registryKey = driver + ":" + dsn
+		}
 		dbRegistryMu.Lock()
 		defer dbRegistryMu.Unlock()
-		if existing, ok := dbRegistry[p]; ok {
+		if existing, ok := dbRegistry[registryKey]; ok {
 			return Ok[any, any](existing)
 		}
-		driver, dsn := detectDriver(p)
 		if driver == "pgx" {
 			// Use pgx's SIMPLE protocol for the app DB so string-bound params
 			// inline as unknown-type literals that Postgres casts per column —
@@ -360,7 +409,7 @@ func Db_connect(path any) any {
 			}
 		}
 		db := &SkyDb{conn: conn, name: p, driver: driver, txCfg: resolveDbTxConfig(driver)}
-		dbRegistry[p] = db
+		dbRegistry[registryKey] = db
 		// Wire the app DB into /_sky/readyz so the endpoint reports 503 during
 		// any window the database is unreachable (including the boot self-heal
 		// window above) instead of lying with 200. One probe per unique DB path
@@ -374,14 +423,39 @@ func Db_connect(path any) any {
 	}
 }
 
+func normaliseDbDriverName(driver string) string {
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case "postgres", "postgresql", "pg", "pgx":
+		return "pgx"
+	case "mysql", "mariadb":
+		return "mysql"
+	case "sqlite", "sqlite3":
+		return "sqlite"
+	default:
+		return ""
+	}
+}
+
 // detectDriver returns the (driverName, dsn) pair for a connection string.
 func detectDriver(s string) (string, string) {
+	return detectDriverForced(s, "")
+}
+
+func detectDriverForced(s, forcedDriver string) (string, string) {
 	ss := strings.TrimSpace(s)
 	low := strings.ToLower(ss)
 	switch {
+	case normaliseDbDriverName(forcedDriver) == "mysql":
+		return "mysql", mysqlDSN(ss)
+	case normaliseDbDriverName(forcedDriver) == "pgx":
+		return "pgx", ss
+	case normaliseDbDriverName(forcedDriver) == "sqlite":
+		return "sqlite", ss
 	case strings.HasPrefix(low, "postgres://"),
 		strings.HasPrefix(low, "postgresql://"):
 		return "pgx", ss
+	case strings.HasPrefix(low, "mysql://"):
+		return "mysql", mysqlDSN(ss)
 	case strings.Contains(low, "host=") && strings.Contains(low, "user="):
 		// libpq keyword form — treat as Postgres
 		return "pgx", ss
@@ -390,16 +464,57 @@ func detectDriver(s string) (string, string) {
 	}
 }
 
+func mysqlDSN(s string) string {
+	trimmed := strings.TrimSpace(s)
+	if strings.HasPrefix(strings.ToLower(trimmed), "mysql://") {
+		if u, err := url.Parse(trimmed); err == nil {
+			cfg := mysql.NewConfig()
+			cfg.Net = "tcp"
+			cfg.Addr = u.Host
+			cfg.DBName = strings.TrimPrefix(u.Path, "/")
+			cfg.User = u.User.Username()
+			cfg.Passwd, _ = u.User.Password()
+			cfg.ParseTime = true
+			if cfg.Params == nil {
+				cfg.Params = map[string]string{}
+			}
+			for k, vs := range u.Query() {
+				if len(vs) > 0 {
+					if k == "parseTime" {
+						cfg.ParseTime = strings.EqualFold(vs[0], "true") || vs[0] == "1"
+					} else {
+						cfg.Params[k] = vs[0]
+					}
+				}
+			}
+			return cfg.FormatDSN()
+		}
+		return strings.TrimPrefix(trimmed, "mysql://")
+	}
+	if cfg, err := mysql.ParseDSN(trimmed); err == nil {
+		cfg.ParseTime = true
+		return cfg.FormatDSN()
+	}
+	return trimmed
+}
+
 // Db.open — alias of connect. Accepts either:
 //
 //	Db.open path               (1 arg)
-//	Db.open driver path        (2 args; driver arg informational, path is used)
+//	Db.open driver path        (2 args; driver selects sqlite/postgres/mysql)
 func Db_open(args ...any) any {
 	switch len(args) {
 	case 1:
 		return Db_connect(args[0])
 	case 2:
-		return Db_connect(args[1])
+		driver, errRes := mustStringTyped(args[0], "Db.open:driver")
+		if errRes != nil {
+			return func() any { return errRes }
+		}
+		if normaliseDbDriverName(driver) == "" {
+			return func() any { return Err[any, any](ErrInvalidInput("Db.open: unknown driver " + driver)) }
+		}
+		return dbConnect(args[1], driver)
 	default:
 		return Err[any, any](ErrInvalidInput("Db.open: expected 1 or 2 args"))
 	}
@@ -843,6 +958,10 @@ func Db_insertFieldsReturning(db any, table any, setFields any, projection any, 
 				return Err[any, any](ErrInvalidInput(
 					"db.insertFieldsReturning: empty RETURNING projection"))
 			}
+			if d.driver == "mysql" {
+				return Err[any, any](ErrInvalidInput(
+					"db.insertFieldsReturning: MySQL does not support INSERT ... RETURNING; use insertFields plus a follow-up SELECT"))
+			}
 			sql, goArgs, buildErr := dbBuildInsertFields(
 				"db.insertFieldsReturning", tbl, asList(setFields))
 			if buildErr != nil {
@@ -1156,14 +1275,14 @@ func dbInsertRowBody(capDb, capTable, capRow any) any {
 		if !ok {
 			return Err[any, any](ErrInvalidInput("db.insertRow: row must be a Dict"))
 		}
-		qTable := safeTable(capTable)
+		qTable := d.safeTable(capTable)
 		if qTable == "" {
 			return Err[any, any](ErrInvalidInput("db.insertRow: invalid table name"))
 		}
 		var cols []string
 		var vals []any
 		for k, v := range m {
-			qc := quoteIdent(k)
+			qc := d.quoteIdent(k)
 			if qc == "" {
 				return Err[any, any](ErrInvalidInput("db.insertRow: invalid column name: " + k))
 			}
@@ -1225,7 +1344,7 @@ func Db_getById(db any, table any, id any) any {
 		if !ok {
 			return Err[any, any](ErrInvalidInput("db.getById: not a Db"))
 		}
-		qTable := safeTable(capTable)
+		qTable := d.safeTable(capTable)
 		if qTable == "" {
 			return Err[any, any](ErrInvalidInput("db.getById: invalid table name"))
 		}
@@ -1261,7 +1380,7 @@ func Db_updateById(db any, table any, id any, row any) any {
 		if !ok {
 			return Err[any, any](ErrInvalidInput("db.updateById: row must be a Dict"))
 		}
-		qTable := safeTable(capTable)
+		qTable := d.safeTable(capTable)
 		if qTable == "" {
 			return Err[any, any](ErrInvalidInput("db.updateById: invalid table name"))
 		}
@@ -1269,7 +1388,7 @@ func Db_updateById(db any, table any, id any, row any) any {
 		var vals []any
 		i := 1
 		for k, v := range m {
-			qc := quoteIdent(k)
+			qc := d.quoteIdent(k)
 			if qc == "" {
 				return Err[any, any](ErrInvalidInput("db.updateById: invalid column name: " + k))
 			}
@@ -1302,7 +1421,7 @@ func Db_deleteById(db any, table any, id any) any {
 		if !ok {
 			return Err[any, any](ErrInvalidInput("db.deleteById: not a Db"))
 		}
-		qTable := safeTable(capTable)
+		qTable := d.safeTable(capTable)
 		if qTable == "" {
 			return Err[any, any](ErrInvalidInput("db.deleteById: invalid table name"))
 		}
@@ -1334,7 +1453,11 @@ func Db_findWhere(db any, table any, whereClause any, args any) any {
 // the predicate is a field/value comparison — those are parameterised
 // end-to-end and safe with any input.
 func Db_unsafeFindWhere(db any, table any, whereClause any, args any) any {
-	qTable := safeTable(table)
+	d, ok := db.(*SkyDb)
+	if !ok {
+		return Err[any, any](ErrInvalidInput("db.unsafeFindWhere: not a Db"))
+	}
+	qTable := d.safeTable(table)
 	if qTable == "" {
 		return Err[any, any](ErrInvalidInput("db.unsafeFindWhere: invalid table name"))
 	}
@@ -1355,11 +1478,11 @@ func Db_findOneByField(db any, table any, field any, value any) any {
 		if !ok {
 			return Err[any, any](ErrInvalidInput("db.findOneByField: not a Db"))
 		}
-		qTable := safeTable(capTable)
+		qTable := d.safeTable(capTable)
 		if qTable == "" {
 			return Err[any, any](ErrInvalidInput("db.findOneByField: invalid table name"))
 		}
-		qField := quoteIdent(fmt.Sprintf("%v", capField))
+		qField := d.quoteIdent(fmt.Sprintf("%v", capField))
 		if qField == "" {
 			return Err[any, any](ErrInvalidInput("db.findOneByField: invalid column name"))
 		}
@@ -1388,11 +1511,11 @@ func Db_findManyByField(db any, table any, field any, value any) any {
 	if !ok {
 		return Err[any, any](ErrInvalidInput("db.findManyByField: not a Db"))
 	}
-	qTable := safeTable(table)
+	qTable := d.safeTable(table)
 	if qTable == "" {
 		return Err[any, any](ErrInvalidInput("db.findManyByField: invalid table name"))
 	}
-	qField := quoteIdent(fmt.Sprintf("%v", field))
+	qField := d.quoteIdent(fmt.Sprintf("%v", field))
 	if qField == "" {
 		return Err[any, any](ErrInvalidInput("db.findManyByField: invalid column name"))
 	}
@@ -1411,7 +1534,7 @@ func Db_findByConditions(db any, table any, conditions any) any {
 	if !ok {
 		return Err[any, any](ErrInvalidInput("db.findByConditions: not a Db"))
 	}
-	qTable := safeTable(table)
+	qTable := d.safeTable(table)
 	if qTable == "" {
 		return Err[any, any](ErrInvalidInput("db.findByConditions: invalid table name"))
 	}
@@ -1427,7 +1550,7 @@ func Db_findByConditions(db any, table any, conditions any) any {
 	args := make([]any, 0, len(m))
 	i := 1
 	for col, val := range m {
-		qc := quoteIdent(col)
+		qc := d.quoteIdent(col)
 		if qc == "" {
 			return Err[any, any](ErrInvalidInput("db.findByConditions: invalid column name: " + col))
 		}
@@ -1601,9 +1724,13 @@ func Db_migrateApply(dbA, pairsA any) any {
 			if !ok {
 				return fail("not a Db handle", Err[any, any](ErrInvalidInput("db.migrate: not a Db")))
 			}
+			migrationNameType := "TEXT"
+			if d.driver == "mysql" {
+				migrationNameType = "VARCHAR(255)"
+			}
 			if _, err := d.conn.Exec(
 				`CREATE TABLE IF NOT EXISTS _sky_migrations (` +
-					`name TEXT PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)`,
+					`name ` + migrationNameType + ` PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)`,
 			); err != nil {
 				return fail("create _sky_migrations: "+err.Error(),
 					Err[any, any](ErrIo("db.migrate: create _sky_migrations: "+err.Error())))

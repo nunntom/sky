@@ -170,6 +170,9 @@ func codecTableColumns(d *SkyDb, table string) (map[string]bool, error) {
 	if d.driver == "pgx" {
 		sql = "SELECT column_name FROM information_schema.columns WHERE table_name = ?"
 		params = []any{table}
+	} else if d.driver == "mysql" {
+		sql = "SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ?"
+		params = []any{table}
 	} else {
 		sql = "PRAGMA table_info(" + table + ")" // PRAGMA takes no bind params
 		params = []any{}
@@ -338,6 +341,18 @@ func storeWriteResult(d *SkyDb, verb, sqlText string, params []any, pk, pkKind s
 	params = bound
 
 	base, _ := codecSplitKind(pkKind)
+	if d.driver == "mysql" && base == "int" && pk != "" {
+		res, err := d.executor().Exec(d.rebind(sqlText), params...)
+		if err != nil {
+			return Err[any, any](ErrIo(verb + ": " + err.Error()))
+		}
+		id, err := res.LastInsertId()
+		if err != nil || id == 0 {
+			n, _ := res.RowsAffected()
+			return Ok[any, any](int(n))
+		}
+		return Ok[any, any](int(id))
+	}
 	if base != "int" || pk == "" {
 		res, err := d.executor().Exec(d.rebind(sqlText), params...)
 		if err != nil {
@@ -480,7 +495,21 @@ func Db_upsertObject(connArg, tableArg, colspecArg, pkArg, objArg, pkKindArg any
 			ph[i] = "?"
 		}
 		var conflict string
-		if len(setParts) == 0 {
+		if d.driver == "mysql" {
+			mysqlSetParts := []string{}
+			for _, col := range cols {
+				if col != pk {
+					mysqlSetParts = append(mysqlSetParts, col+" = VALUES("+col+")")
+				}
+			}
+			if pk != "" {
+				mysqlSetParts = append(mysqlSetParts, pk+" = LAST_INSERT_ID("+pk+")")
+			}
+			if len(mysqlSetParts) == 0 {
+				mysqlSetParts = append(mysqlSetParts, pk+" = "+pk)
+			}
+			conflict = "ON DUPLICATE KEY UPDATE " + strings.Join(mysqlSetParts, ", ")
+		} else if len(setParts) == 0 {
 			conflict = fmt.Sprintf("ON CONFLICT(%s) DO NOTHING", pk)
 		} else {
 			conflict = fmt.Sprintf("ON CONFLICT(%s) DO UPDATE SET %s", pk, strings.Join(setParts, ", "))
@@ -710,8 +739,8 @@ func Db_updateWhere(connArg, tableArg, setColspecArg, objArg, whereSqlArg, where
 	}
 }
 
-// dbDriverOf returns the driver ("pgx" / "sqlite") for a Db conn arg, or "" if the
-// arg isn't a *SkyDb.
+// dbDriverOf returns the driver ("pgx" / "sqlite" / "mysql") for a Db conn arg,
+// or "" if the arg isn't a *SkyDb.
 func dbDriverOf(connArg any) string {
 	if d, ok := connArg.(*SkyDb); ok {
 		return d.driver

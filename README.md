@@ -251,7 +251,7 @@ A short tour. Full reference at `sky doc --serve` or
 | `Std.Bundle`           | Cross-platform packaging identity in code (`withName` / `withId` / `withIcon` / `withVersion` / `withPermission` / `withAsset`); `sky build --target` fills the Info.plist / AndroidManifest / icons / entitlements. |
 | `Sky.Http.Server`      | HTTP server with typed routes, middleware (CORS / logging / rate-limit / basic-auth), streaming responses, WebSocket upgrade. |
 | `Std.Auth`             | bcrypt password hashing, HS256 / RS256 JWT, register / login / roles. Typed secrets — never `fmt.Sprintf("%v", token)`. |
-| `Std.Db`               | SQLite + PostgreSQL via one interface. Connection pool, prepared statements, versioned migrations, `Db.RowDecoder`, `withTransaction`. Sky can also ship and supervise the PostgreSQL itself — see below. |
+| `Std.Db`               | SQLite + PostgreSQL + MySQL via one interface. Connection pool, prepared statements, versioned migrations, `Db.RowDecoder`, `withTransaction`. Sky can also ship and supervise PostgreSQL itself — see below. |
 | `Std.Db.Schema`        | Typed, dialect-safe schema DSL — define tables as values; `createTable` emits the correct `CREATE TABLE` for SQLite **and** Postgres from one definition (no `INTEGER`-overflow / `AUTOINCREMENT`-vs-`BIGSERIAL` drift). |
 | `Std.Money` + `Std.Decimal` | Arbitrary-precision Decimal + currency-typed Money (50+ ISO 4217 codes + crypto) with `allocate` for fair splits and conversion rates. |
 | `Std.Cache`            | LRU + TTL in-memory cache, parametric on key + value, monotone stats. |
@@ -368,7 +368,7 @@ storePath = "sessions.db"
 ttl = "30m"
 
 [database]
-driver = "sqlite"         # sqlite / postgres
+driver = "sqlite"         # sqlite / postgres / mysql
 url = "DATABASE_URL"
 
 # Std.Auth has no [auth] section — it's a library. signToken takes the
@@ -423,7 +423,7 @@ same content in the repo.
 - **[Sky.Webview](docs/skywebview/overview.md)** — native desktop
   window.
 - **[Std.Auth](docs/skyauth/overview.md)** — sessions + JWT + roles.
-- **[Std.Db](docs/skydb/overview.md)** — SQLite + PostgreSQL.
+- **[Std.Db](docs/skydb/overview.md)** — SQLite + PostgreSQL + MySQL.
 - **[Embedded PostgreSQL](docs/skydb/embedded-postgres.md)** — the four
   tiers, from a per-project dev cluster to a shared host one.
 - **[`sky.toml`](docs/sky-toml.md)** — every config key.

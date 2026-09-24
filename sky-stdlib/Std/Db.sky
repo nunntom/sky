@@ -65,8 +65,8 @@ import Std.Money as Money
 -- raw millis for driver-side `time.UnixMilli(...).UTC()` round-trip.
 -- ─── Connection lifecycle ──────────────────────────────────────────
 -- | `open driver dsn` — opens a database connection.
--- `driver` is `"sqlite"` / `"postgres"`; `dsn` is the connection
--- string.
+-- `driver` is `"sqlite"` / `"postgres"` / `"mysql"`; `dsn` is the
+-- connection string.
 open : String -> String -> Task Error Db
 open =
     -- v0.16.26 — typed SQL value binding (#582)
@@ -343,7 +343,7 @@ getBool =
 
 -- ─── Typed SQL parameter binding (v0.16.26 — #582) ─────────────────
 -- | A typed SQL parameter value for prepared-statement binding.
--- Covers SQLite's 5 storage classes + PostgreSQL's common extensions
+-- Covers SQLite's 5 storage classes + PostgreSQL/MySQL common extensions
 -- (Decimal, Time, Bytes, Money). Lets `List SqlValue` flow
 -- homogeneously through `Db.exec` / `Db.query` while preserving
 -- per-column type-information to the SQL driver.
@@ -576,8 +576,8 @@ insertFields =
 --     --      RETURNING id, created_at
 --     -- decodes one row per row affected (typically exactly one)
 --
--- Requires SQLite ≥ 3.35 (Mar 2021) or PostgreSQL — same as every
--- other `RETURNING` use already in `Std.Db`.  (#586)
+-- Requires SQLite ≥ 3.35 (Mar 2021) or PostgreSQL. MySQL has no portable
+-- `INSERT ... RETURNING`; use `insertFields` plus a follow-up SELECT. (#586)
 insertFieldsReturning : Db -> String -> List ( String, SqlField ) -> String -> Decoder a -> Task Error (List a)
 insertFieldsReturning =
     Ffi.kernel "Db_insertFieldsReturning"

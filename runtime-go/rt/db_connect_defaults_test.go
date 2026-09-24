@@ -98,6 +98,52 @@ func TestDbConnectAppliesConcurrencyDefaults(t *testing.T) {
 
 // In-memory DBs may reject WAL. Fix must still return Ok (PRAGMA
 // failure is Log_warn, not abort).
+func TestDetectDriverRecognisesMySQL(t *testing.T) {
+	driver, dsn := detectDriver("mysql://alice:secret@db.example.com:3306/app?charset=utf8mb4")
+	if driver != "mysql" {
+		t.Fatalf("driver: want mysql, got %q", driver)
+	}
+	for _, want := range []string{"alice:secret@tcp(db.example.com:3306)/app", "charset=utf8mb4", "parseTime=true"} {
+		if !strings.Contains(dsn, want) {
+			t.Fatalf("mysql DSN %q missing %q", dsn, want)
+		}
+	}
+	forced, _ := detectDriverForced("user:pass@tcp(localhost:3306)/app", "mysql")
+	if forced != "mysql" {
+		t.Fatalf("forced driver: want mysql, got %q", forced)
+	}
+}
+
+func TestMySQLRewriteCoversDurableSnapshotUpserts(t *testing.T) {
+	cases := map[string][]string{
+		"INSERT INTO _sky_durable_runs (id) VALUES (?) ON CONFLICT (id) DO NOTHING": {
+			"ON DUPLICATE KEY UPDATE id = id",
+		},
+		"INSERT INTO _sky_durable_snapshot (run_id, seq, model_json, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (run_id) DO UPDATE SET seq = excluded.seq, model_json = excluded.model_json, updated_at = excluded.updated_at WHERE excluded.seq > _sky_durable_snapshot.seq": {
+			"ON DUPLICATE KEY UPDATE",
+			"IF(VALUES(seq) > seq",
+			"VALUES(model_json)",
+		},
+		"INSERT INTO _sky_durable_snapshot (run_id, seq, model_json, updated_at) VALUES (?, COALESCE((SELECT seq FROM _sky_durable_snapshot WHERE run_id = ?), 0) + 1, ?, ?) ON CONFLICT (run_id) DO UPDATE SET seq = _sky_durable_snapshot.seq + 1, model_json = excluded.model_json, updated_at = excluded.updated_at": {
+			"VALUES (?, IF(? IS NULL, 1, 1), ?, ?)",
+			"ON DUPLICATE KEY UPDATE",
+			"seq = seq + 1",
+			"VALUES(updated_at)",
+		},
+	}
+	for in, wants := range cases {
+		got := mysqlRewriteQuery(in)
+		if strings.Contains(got, "ON CONFLICT") || strings.Contains(got, "excluded.") {
+			t.Fatalf("mysql rewrite left non-MySQL syntax:\n%s", got)
+		}
+		for _, want := range wants {
+			if !strings.Contains(got, want) {
+				t.Fatalf("mysql rewrite\n%s\nmissing %q", got, want)
+			}
+		}
+	}
+}
+
 func TestDbConnectMemoryDbSkipsPragmaFailure(t *testing.T) {
 	db := unwrapDbConnect(t, ":memory:")
 	defer func() {

@@ -90,9 +90,9 @@ func configSetStr(cfg any, key string, value any) map[string]any {
 	return out
 }
 
-// Config_withDatabase sets the database DSN. `kind` is "sqlite" | "postgres"
-// (normalised in Sky). SQLite writes the prefixed `DB_PATH` (a file path);
-// Postgres writes the literal `DATABASE_URL` — the name Db_connect falls back
+// Config_withDatabase sets the database DSN. `kind` is "sqlite" | "postgres" |
+// "mysql" (normalised in Sky). SQLite writes the prefixed `DB_PATH` (a file path);
+// Postgres/MySQL write the literal `DATABASE_URL` — the name Db_connect falls back
 // to and the session/analytics/jobs stores read. Both names are exactly the
 // ones `rt.embeddedDSNConflict` checks, so a `withDatabase` DSN in an `--embed`
 // app is refused at startup identically to an explicit env/sky.toml DSN
@@ -102,7 +102,7 @@ func Config_withDatabase(kind, value, cfg any) any {
 	switch k {
 	case "sqlite":
 		return configSetStr(cfg, "DbPath", value)
-	case "postgres":
+	case "postgres", "mysql":
 		return configSetStr(cfg, "DatabaseUrl", value)
 	default:
 		return configClone(cfg)

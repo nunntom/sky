@@ -1,8 +1,8 @@
 //go:build !js
 
 // Package rt — Std.Db.Schema runtime: render a typed Table definition into the
-// DIALECT-CORRECT DDL for the connection's backend (SQLite or Postgres) and
-// execute it. The portable → dialect type mapping (below) is what lets ONE
+// DIALECT-CORRECT DDL for the connection's backend (SQLite, Postgres, or MySQL)
+// and execute it. The portable → dialect type mapping (below) is what lets ONE
 // schema definition run unchanged on both, killing the INTEGER/BIGINT,
 // AUTOINCREMENT/BIGSERIAL, and datetime()/now() drift.
 //
@@ -68,7 +68,7 @@ func schemaRenderTable(driver string, tableArg any) []string {
 		fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)", name, strings.Join(defs, ",\n  ")),
 	}
 	for _, idx := range AsList(Field(tableArg, "Indexes")) {
-		out = append(out, schemaRenderIndex(name, idx))
+		out = append(out, schemaRenderIndex(driver, name, idx))
 	}
 	return out
 }
@@ -87,10 +87,14 @@ func schemaRenderColumn(driver string, colArg any) string {
 	// Auto-increment PK is a single dialect-specific token that already implies
 	// PRIMARY KEY.
 	if pk && autoInc {
-		if driver == "pgx" {
+		switch driver {
+		case "pgx":
 			return name + " BIGSERIAL PRIMARY KEY"
+		case "mysql":
+			return name + " BIGINT AUTO_INCREMENT PRIMARY KEY"
+		default:
+			return name + " INTEGER PRIMARY KEY AUTOINCREMENT"
 		}
-		return name + " INTEGER PRIMARY KEY AUTOINCREMENT"
 	}
 
 	parts := []string{name, schemaTypeName(driver, kind)}
@@ -112,7 +116,7 @@ func schemaRenderColumn(driver string, colArg any) string {
 	return strings.Join(parts, " ")
 }
 
-func schemaRenderIndex(tableName string, idxArg any) string {
+func schemaRenderIndex(driver, tableName string, idxArg any) string {
 	idxName := fmt.Sprintf("%v", Field(idxArg, "Name"))
 	uniq := schemaBool(Field(idxArg, "IsUniqueIndex"))
 	cols := AsList(Field(idxArg, "Columns"))
@@ -124,6 +128,10 @@ func schemaRenderIndex(tableName string, idxArg any) string {
 	if uniq {
 		kw = "UNIQUE INDEX"
 	}
+	if driver == "mysql" {
+		return fmt.Sprintf("CREATE %s %s ON %s (%s)",
+			kw, idxName, tableName, strings.Join(colNames, ", "))
+	}
 	return fmt.Sprintf("CREATE %s IF NOT EXISTS %s ON %s (%s)",
 		kw, idxName, tableName, strings.Join(colNames, ", "))
 }
@@ -132,15 +140,16 @@ func schemaRenderIndex(tableName string, idxArg any) string {
 // place the dialect difference lives.
 func schemaTypeName(driver, kind string) string {
 	pg := driver == "pgx"
+	my := driver == "mysql"
 	switch kind {
 	case "text":
 		return "TEXT"
 	case "int":
 		return "INTEGER"
 	case "bigint", "timestamp":
-		// The one that MUST diverge — Postgres INTEGER is 4-byte + overflows on
-		// millis; SQLite INTEGER is 8-byte. Both read back as int64.
-		if pg {
+		// The one that MUST diverge — Postgres/MySQL INTEGER is 4-byte + overflows
+		// on millis; SQLite INTEGER is 8-byte. All read back as int64.
+		if pg || my {
 			return "BIGINT"
 		}
 		return "INTEGER"
@@ -148,17 +157,23 @@ func schemaTypeName(driver, kind string) string {
 		if pg {
 			return "DOUBLE PRECISION"
 		}
+		if my {
+			return "DOUBLE"
+		}
 		return "REAL"
 	case "bool":
-		// Native BOOLEAN on Postgres; INTEGER 0/1 on SQLite. A SqlBool (Go bool)
-		// binds to both, and Decode.bool reads both back.
-		if pg {
+		// Native BOOLEAN on Postgres/MySQL; INTEGER 0/1 on SQLite. A SqlBool (Go bool)
+		// binds to all three, and Decode.bool reads both representations back.
+		if pg || my {
 			return "BOOLEAN"
 		}
 		return "INTEGER"
 	case "blob":
 		if pg {
 			return "BYTEA"
+		}
+		if my {
+			return "LONGBLOB"
 		}
 		return "BLOB"
 	case "json":
@@ -193,6 +208,9 @@ func schemaDefault(driver, kind, val string) string {
 	case "now":
 		if driver == "pgx" {
 			return "now()"
+		}
+		if driver == "mysql" {
+			return "CURRENT_TIMESTAMP"
 		}
 		return "(datetime('now'))"
 	default:

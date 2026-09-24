@@ -40,12 +40,13 @@ func TestSchemaDialectMapping(t *testing.T) {
 
 	sqlite := schemaRenderTable("sqlite", tbl)
 	pg := schemaRenderTable("pgx", tbl)
+	my := schemaRenderTable("mysql", tbl)
 
 	// The CREATE TABLE is element 0; the index is element 1.
-	if len(sqlite) != 2 || len(pg) != 2 {
-		t.Fatalf("expected 2 statements each; got sqlite=%d pg=%d", len(sqlite), len(pg))
+	if len(sqlite) != 2 || len(pg) != 2 || len(my) != 2 {
+		t.Fatalf("expected 2 statements each; got sqlite=%d pg=%d mysql=%d", len(sqlite), len(pg), len(my))
 	}
-	sq, pq := sqlite[0], pg[0]
+	sq, pq, mq := sqlite[0], pg[0], my[0]
 
 	// --- the dialect-critical divergences ---
 	// bigint: INTEGER (sqlite) vs BIGINT (pg) — the millis-overflow fix.
@@ -55,20 +56,29 @@ func TestSchemaDialectMapping(t *testing.T) {
 	if !strings.Contains(pq, "created_at BIGINT") {
 		t.Errorf("pg bigint should be BIGINT:\n%s", pq)
 	}
-	// auto-increment PK: INTEGER PRIMARY KEY AUTOINCREMENT vs BIGSERIAL PRIMARY KEY.
+	if !strings.Contains(mq, "created_at BIGINT") {
+		t.Errorf("mysql bigint should be BIGINT:\n%s", mq)
+	}
+	// auto-increment PK: INTEGER PRIMARY KEY AUTOINCREMENT vs BIGSERIAL/AUTO_INCREMENT PRIMARY KEY.
 	if !strings.Contains(sq, "seq INTEGER PRIMARY KEY AUTOINCREMENT") {
 		t.Errorf("sqlite serial wrong:\n%s", sq)
 	}
 	if !strings.Contains(pq, "seq BIGSERIAL PRIMARY KEY") {
 		t.Errorf("pg serial wrong:\n%s", pq)
 	}
+	if !strings.Contains(mq, "seq BIGINT AUTO_INCREMENT PRIMARY KEY") {
+		t.Errorf("mysql serial wrong:\n%s", mq)
+	}
 
-	// --- bool: INTEGER 0/1 on SQLite, native BOOLEAN on Postgres ---
+	// --- bool: INTEGER 0/1 on SQLite, native BOOLEAN on Postgres/MySQL ---
 	if !strings.Contains(sq, "active INTEGER") {
 		t.Errorf("sqlite bool should be INTEGER:\n%s", sq)
 	}
 	if !strings.Contains(pq, "active BOOLEAN") {
 		t.Errorf("pg bool should be BOOLEAN:\n%s", pq)
+	}
+	if !strings.Contains(mq, "active BOOLEAN") {
+		t.Errorf("mysql bool should be BOOLEAN:\n%s", mq)
 	}
 	if !strings.Contains(sq, "active INTEGER NOT NULL DEFAULT 1") {
 		t.Errorf("sqlite bool default should be 1:\n%s", sq)
@@ -76,9 +86,12 @@ func TestSchemaDialectMapping(t *testing.T) {
 	if !strings.Contains(pq, "active BOOLEAN NOT NULL DEFAULT TRUE") {
 		t.Errorf("pg bool default should be TRUE:\n%s", pq)
 	}
+	if !strings.Contains(mq, "active BOOLEAN NOT NULL DEFAULT 1") {
+		t.Errorf("mysql bool default should be 1/true:\n%s", mq)
+	}
 
 	// --- shared structure ---
-	for _, q := range []string{sq, pq} {
+	for _, q := range []string{sq, pq, mq} {
 		if !strings.Contains(q, "CREATE TABLE IF NOT EXISTS products") {
 			t.Errorf("missing CREATE TABLE:\n%s", q)
 		}
@@ -93,9 +106,12 @@ func TestSchemaDialectMapping(t *testing.T) {
 		}
 	}
 
-	// index (same on both)
+	// indexes: SQLite/Postgres use IF NOT EXISTS; MySQL's grammar does not.
 	if !strings.Contains(sqlite[1], "CREATE INDEX IF NOT EXISTS idx_products_slug ON products (slug)") {
-		t.Errorf("index DDL wrong:\n%s", sqlite[1])
+		t.Errorf("sqlite index DDL wrong:\n%s", sqlite[1])
+	}
+	if !strings.Contains(my[1], "CREATE INDEX idx_products_slug ON products (slug)") {
+		t.Errorf("mysql index DDL wrong:\n%s", my[1])
 	}
 }
 
@@ -105,6 +121,9 @@ func TestSchemaDefaultsAndFk(t *testing.T) {
 	}
 	if got := schemaDefault("sqlite", "now", ""); got != "(datetime('now'))" {
 		t.Errorf("sqlite now default = %q", got)
+	}
+	if got := schemaDefault("mysql", "now", ""); got != "CURRENT_TIMESTAMP" {
+		t.Errorf("mysql now default = %q", got)
 	}
 	if got := schemaDefault("pgx", "text", "O'Brien"); got != "'O''Brien'" {
 		t.Errorf("text default escaping = %q", got)
