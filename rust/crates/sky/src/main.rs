@@ -9390,6 +9390,37 @@ fn watch_build_and_spawn(
     no_run: bool,
     app_envs: &[(String, String)],
 ) -> Option<std::process::Child> {
+    // Mirror `sky run` for dispatched Std.App entries. The generic build path
+    // type-checks the target-independent core, but it does NOT rewrite
+    // `App.run` to the selected backend. That made `sky watch` run a web app as
+    // the fallback terminal shape while `sky run` correctly selected `web` (or
+    // `[app] target`). Build the derived target entry, then spawn the standard
+    // copied binary just like a normal watch iteration.
+    if is_std_app_dispatched_entry(file) {
+        let tgt = match watch_std_app_target(project_dir) {
+            Ok(t) => t,
+            Err(msg) => {
+                eprintln!("[watch] {msg}");
+                return None;
+            }
+        };
+        let entry = if file.is_absolute() {
+            file.to_path_buf()
+        } else {
+            project_dir.join(file)
+        };
+        let code = build_std_app(repo_root, project_dir, &entry, tgt, false, None, false);
+        if code != ExitCode::SUCCESS {
+            eprintln!("[watch] derived build failed (keeping previous binary)");
+            return None;
+        }
+        println!("[watch] build ok");
+        if no_run {
+            return None;
+        }
+        return watch_spawn_binary(project_dir, project_dir.join("sky-out").join("app"), app_envs);
+    }
+
     let opts = BuildOptions {
         repo_root: repo_root.to_path_buf(),
         example_dir: project_dir.to_path_buf(),
@@ -9426,8 +9457,23 @@ fn watch_build_and_spawn(
     }
     let out_dir = project_dir.join("sky-out");
     let bin_name = project::configured_bin_name(project_dir);
-    let mut cmd = Command::new(format!("./{bin_name}"));
-    cmd.current_dir(&out_dir);
+    watch_spawn_binary(&out_dir, PathBuf::from(format!("./{bin_name}")), app_envs)
+}
+
+fn watch_std_app_target(project_dir: &Path) -> Result<target::Target, String> {
+    match sky_toml_app_target(project_dir) {
+        Some(t) => target::Target::parse(&t).map_err(|msg| format!("sky.toml [app] target = \"{t}\": {msg}")),
+        None => Ok(target::Target::Web),
+    }
+}
+
+fn watch_spawn_binary(
+    cwd: &Path,
+    binary: PathBuf,
+    app_envs: &[(String, String)],
+) -> Option<std::process::Child> {
+    let mut cmd = Command::new(&binary);
+    cmd.current_dir(cwd);
     // The embedded cluster's DSN, when the project has one. EVERY respawn gets
     // it: a rebuild replaces the process, and a replacement that lost its DSN
     // would fail to connect while the cluster it was meant to use sat running.
@@ -9437,7 +9483,7 @@ fn watch_build_and_spawn(
     match cmd.spawn() {
         Ok(child) => Some(child),
         Err(e) => {
-            eprintln!("[watch] could not launch binary: {e}");
+            eprintln!("[watch] could not launch binary {}: {e}", binary.display());
             None
         }
     }
@@ -9453,6 +9499,8 @@ fn is_watched_change(path: &Path) -> bool {
                 | Some("sky-out-rust")
                 | Some(".skycache")
                 | Some(".skydeps")
+                | Some(".skyapp")
+                | Some(".split")
                 | Some("dist-newstyle")
                 | Some(".git")
                 | Some("node_modules")
